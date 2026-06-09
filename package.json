@@ -1,21 +1,32 @@
 {
-  "name": "postgres-mcp-server",
+  "name": "@rexymayderio/postgres-mcp",
   "version": "1.0.0",
-  "description": "MCP server for connecting Cursor to PostgreSQL database",
+  "description": "MCP server for connecting to PostgreSQL database",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "postgres-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/index.js",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsc --watch"
   },
-  "keywords": ["mcp", "postgresql", "cursor"],
+  "keywords": [
+    "mcp",
+    "postgresql",
+    "postgres",
+    "database"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
     "pg": "^8.11.3",
-    "dotenv": "^16.4.5",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -24,4 +35,3 @@
     "typescript": "^5.5.3"
   }
 }
-

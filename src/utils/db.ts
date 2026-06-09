@@ -1,21 +1,4 @@
 import { Pool, PoolClient } from 'pg';
-import dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-
-// Get the directory of the current module (works for both ESM and CommonJS)
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// Load .env file from the project root (go up from dist/utils to project root)
-const projectRoot = join(__dirname, '../..');
-const envPath = join(projectRoot, '.env');
-const envResult = dotenv.config({ path: envPath });
-
-// Log if .env file was loaded (only in development/debugging)
-if (process.env.NODE_ENV !== 'production' && envResult.error) {
-  console.error(`Warning: Could not load .env file from ${envPath}:`, envResult.error.message);
-}
 
 let pool: Pool | null = null;
 
