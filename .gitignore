@@ -3,12 +3,12 @@ node_modules/
 
 # Build outputs
 dist/
+test-dist/
 *.tsbuildinfo
 
-# Environment variables and secrets
+# Environment variables and secrets — never commit; runtime secrets live in mcp.json env only
 .env
-.env.local
-.env.*.local
+.env.*
 *.env
 
 # Logs
@@ -37,4 +37,4 @@ Thumbs.db
 *.tmp
 *.temp
 .cache/
-
+qc-report.json

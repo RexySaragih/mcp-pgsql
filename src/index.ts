@@ -8,266 +8,143 @@ import {
   ErrorCode,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-
-// Import tools
+import { closePool } from './clients/postgres-client.js';
 import {
-  listSchemasTool,
-  listSchemas,
-  listTablesTool,
-  listTables,
+  sanitizeErrorMessage,
+  warnIfRepoDotEnvPresent,
+} from './clients/base-client.js';
+import {
   describeTableTool,
-  describeTable,
+  handleDescribeTable,
+  handleListRelationships,
+  handleListTables,
   listRelationshipsTool,
-  listRelationships,
+  listSchemas,
+  listSchemasTool,
+  listTablesTool,
 } from './tools/schema.js';
-
 import {
+  handleReadQuery,
+  handleSchemaQuery,
+  handleTransactionQuery,
+  handleWriteQuery,
   readQueryTool,
-  readQuery,
-  writeQueryTool,
-  writeQuery,
   schemaQueryTool,
-  schemaQuery,
   transactionQueryTool,
-  transactionQuery,
+  writeQueryTool,
 } from './tools/query.js';
-
 import {
-  listTemplatesTool,
+  handleRunTemplate,
   listTemplates,
+  listTemplatesTool,
   runTemplateTool,
-  runTemplate,
 } from './tools/templates.js';
-
 import {
   explainQueryTool,
-  explainQuery,
+  handleExplainQuery,
 } from './tools/analysis.js';
 
-import { closePool } from './utils/db.js';
+const SERVER_NAME = 'postgres-mcp-server';
+const SERVER_VERSION = '1.1.0';
 
-// Create server instance
+type ToolResponse = {
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+};
+
 const server = new Server(
-  {
-    name: 'postgres-mcp-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
+  { name: SERVER_NAME, version: SERVER_VERSION },
+  { capabilities: { tools: {} } },
 );
 
-// Register all tools
-const tools = [
-  // Schema introspection
-  listSchemasTool,
-  listTablesTool,
-  describeTableTool,
-  listRelationshipsTool,
-  
-  // Query execution
-  readQueryTool,
-  writeQueryTool,
-  schemaQueryTool,
-  transactionQueryTool,
-  
-  // Templates
-  listTemplatesTool,
-  runTemplateTool,
-  
-  // Analysis
-  explainQueryTool,
-];
+function logTool(
+  tool: string,
+  status: 'ok' | 'error',
+  durationMs: number,
+): void {
+  console.error(
+    `[mcp=${SERVER_NAME} tool=${tool} status=${status} duration_ms=${durationMs}]`,
+  );
+}
 
-// List tools handler
-server.setRequestHandler(ListToolsRequestSchema, async () => {
+function textResult(text: string): ToolResponse {
+  const isError = text.startsWith('Error:') || text.startsWith('**Transaction failed');
   return {
-    tools,
+    content: [{ type: 'text', text }],
+    ...(isError ? { isError: true } : {}),
   };
-});
+}
 
-// Call tool handler
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+async function start(): Promise<void> {
+  warnIfRepoDotEnvPresent();
+  const tools = [
+    listSchemasTool,
+    listTablesTool,
+    describeTableTool,
+    listRelationshipsTool,
+    readQueryTool,
+    writeQueryTool,
+    schemaQueryTool,
+    transactionQueryTool,
+    listTemplatesTool,
+    runTemplateTool,
+    explainQueryTool,
+  ];
 
-  try {
-    switch (name) {
-      // Schema introspection
-      case 'list_schemas':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await listSchemas(),
-            },
-          ],
-        };
+  const handlers: Record<string, (args: unknown) => Promise<string>> = {
+    list_schemas: async () => listSchemas(),
+    list_tables: (args) => handleListTables(args),
+    describe_table: (args) => handleDescribeTable(args),
+    list_relationships: (args) => handleListRelationships(args),
+    read_query: (args) => handleReadQuery(args),
+    write_query: (args) => handleWriteQuery(args),
+    schema_query: (args) => handleSchemaQuery(args),
+    transaction_query: (args) => handleTransactionQuery(args),
+    list_templates: async () => listTemplates(),
+    run_template: (args) => handleRunTemplate(args),
+    explain_query: (args) => handleExplainQuery(args),
+  };
 
-      case 'list_tables':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await listTables(args?.schema as string | undefined),
-            },
-          ],
-        };
-
-      case 'describe_table':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await describeTable(
-                args?.schema as string | undefined,
-                args?.table as string
-              ),
-            },
-          ],
-        };
-
-      case 'list_relationships':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await listRelationships(
-                args?.schema as string | undefined,
-                args?.table as string | undefined
-              ),
-            },
-          ],
-        };
-
-      // Query execution
-      case 'read_query':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await readQuery(args?.sql as string),
-            },
-          ],
-        };
-
-      case 'write_query':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await writeQuery(
-                args?.sql as string,
-                args?.confirmed as boolean | undefined
-              ),
-            },
-          ],
-        };
-
-      case 'schema_query':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await schemaQuery(
-                args?.sql as string,
-                args?.confirmed as boolean | undefined
-              ),
-            },
-          ],
-        };
-
-      case 'transaction_query':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await transactionQuery(
-                args?.sql as string,
-                args?.confirmed as boolean | undefined
-              ),
-            },
-          ],
-        };
-
-      // Templates
-      case 'list_templates':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await listTemplates(),
-            },
-          ],
-        };
-
-      case 'run_template':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await runTemplate(
-                args?.template_id as string,
-                args?.parameters as Record<string, any>
-              ),
-            },
-          ],
-        };
-
-      // Analysis
-      case 'explain_query':
-        return {
-          content: [
-            {
-              type: 'text',
-              text: await explainQuery(
-                args?.sql as string,
-                args?.analyze as boolean | undefined,
-                args?.format as 'text' | 'json' | 'xml' | 'yaml' | undefined
-              ),
-            },
-          ],
-        };
-
-      default:
-        throw new McpError(
-          ErrorCode.MethodNotFound,
-          `Unknown tool: ${name}`
-        );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    const handler = handlers[name];
+    if (!handler) {
+      throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
-  } catch (error: any) {
-    if (error instanceof McpError) {
-      throw error;
+    const started = Date.now();
+    try {
+      const text = await handler(args ?? {});
+      const result = textResult(text);
+      logTool(name, result.isError ? 'error' : 'ok', Date.now() - started);
+      return result;
+    } catch (error: unknown) {
+      logTool(name, 'error', Date.now() - started);
+      if (error instanceof McpError) throw error;
+      throw new McpError(
+        ErrorCode.InternalError,
+        sanitizeErrorMessage(error),
+      );
     }
-    throw new McpError(
-      ErrorCode.InternalError,
-      `Error executing tool ${name}: ${error.message}`
-    );
-  }
-});
-
-// Start server
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  
-  console.error('PostgreSQL MCP server running on stdio');
-
-  // Cleanup on exit
-  process.on('SIGINT', async () => {
-    await closePool();
-    process.exit(0);
   });
 
-  process.on('SIGTERM', async () => {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(`${SERVER_NAME} ${SERVER_VERSION} running on stdio`);
+
+  const shutdown = async (): Promise<void> => {
     await closePool();
     process.exit(0);
+  };
+  process.on('SIGINT', () => {
+    void shutdown();
+  });
+  process.on('SIGTERM', () => {
+    void shutdown();
   });
 }
 
-main().catch((error) => {
-  console.error('Fatal error in main():', error);
+start().catch((error: unknown) => {
+  console.error('Fatal error:', sanitizeErrorMessage(error));
   process.exit(1);
 });
-

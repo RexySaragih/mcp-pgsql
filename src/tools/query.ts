@@ -1,249 +1,303 @@
-import { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { query, executeTransaction } from '../utils/db.js';
-import { analyzeQuery, formatPreviewMessage } from '../utils/safety.js';
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
+import { ClientConstants } from '../clients/base-client.js';
+import { getPostgresClient } from '../clients/postgres-client.js';
+import { sanitizeErrorMessage } from '../clients/base-client.js';
+import { formatRowsTable } from '../utils/format.js';
+import {
+  analyzeQuery,
+  assertReadOnlySelect,
+  formatPreviewMessage,
+  formatSoftConfirmationPrompt,
+  formatTransactionPreview,
+} from '../utils/sql-safety.js';
+
+const READ_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+const WRITE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+
+const DESTRUCTIVE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
 
 export const readQueryTool: Tool = {
   name: 'read_query',
-  description: 'Execute SELECT queries (read-only, safe to execute without confirmation)',
+  description:
+    'Execute a single SELECT / WITH … SELECT. Mutating SQL rejected. FOR UPDATE/SHARE need confirmed=true. Results are LIMIT-capped.',
   inputSchema: {
     type: 'object',
     properties: {
-      sql: {
-        type: 'string',
-        description: 'SQL SELECT query to execute',
+      sql: { type: 'string', description: 'SELECT or WITH … SELECT' },
+      max_rows: {
+        type: 'number',
+        description: `Max rows (default ${ClientConstants.DEFAULT_MAX_ROWS}, hard max ${ClientConstants.HARD_MAX_ROWS})`,
+      },
+      confirmed: {
+        type: 'boolean',
+        description:
+          'Required true for SELECT with FOR UPDATE / FOR SHARE. Otherwise returns a confirmation preview.',
       },
     },
     required: ['sql'],
   },
+  annotations: READ_ANNOTATIONS,
 };
-
-export async function readQuery(sql: string): Promise<string> {
-  const analysis = analyzeQuery(sql);
-  
-  if (!analysis.isReadOnly) {
-    return `Error: This tool only accepts SELECT queries. For write operations, use write_query. For schema changes, use schema_query.`;
-  }
-
-  try {
-    const result = await query(sql);
-    
-    if (result.rows.length === 0) {
-      return 'Query executed successfully. No rows returned.';
-    }
-
-    const lines: string[] = [
-      `**Query executed successfully** (${result.duration}ms)\n`,
-      `**Rows returned:** ${result.rowCount}\n`,
-    ];
-
-    // Format results as a table
-    if (result.rows.length > 0) {
-      const columns = Object.keys(result.rows[0]);
-      lines.push('**Results:**\n');
-      lines.push('```');
-      
-      // Header
-      lines.push(columns.join(' | '));
-      lines.push(columns.map(() => '---').join(' | '));
-      
-      // Rows (limit to 100 for display)
-      const displayRows = result.rows.slice(0, 100);
-      for (const row of displayRows) {
-        const values = columns.map(col => {
-          const val = row[col];
-          if (val === null) return 'NULL';
-          if (typeof val === 'object') return JSON.stringify(val);
-          return String(val);
-        });
-        lines.push(values.join(' | '));
-      }
-      
-      if (result.rows.length > 100) {
-        lines.push(`\n... and ${result.rows.length - 100} more rows`);
-      }
-      
-      lines.push('```');
-    }
-
-    return lines.join('\n');
-  } catch (error: any) {
-    return `Error executing query: ${error.message}`;
-  }
-}
 
 export const writeQueryTool: Tool = {
   name: 'write_query',
-  description: 'Execute INSERT, UPDATE, or DELETE queries. Requires confirmation before execution.',
+  description:
+    'Execute INSERT, UPDATE, or DELETE. Separate from read_query and schema_query. Requires confirmed=true after a strong confirmation preview — nothing runs until then.',
   inputSchema: {
     type: 'object',
     properties: {
       sql: {
         type: 'string',
-        description: 'SQL INSERT, UPDATE, or DELETE query to execute',
+        description: 'Single INSERT/UPDATE/DELETE statement',
       },
       confirmed: {
         type: 'boolean',
-        description: 'Must be true to actually execute the query. If false or omitted, returns a preview only.',
+        description:
+          'Must be true to execute. If omitted/false, returns an impact preview only — nothing runs.',
         default: false,
       },
     },
     required: ['sql'],
   },
+  annotations: WRITE_ANNOTATIONS,
 };
-
-export async function writeQuery(sql: string, confirmed: boolean = false): Promise<string> {
-  const analysis = analyzeQuery(sql);
-  
-  // Check if it's actually a write query
-  if (analysis.isReadOnly) {
-    return `Error: This tool only accepts INSERT, UPDATE, or DELETE queries. For SELECT queries, use read_query.`;
-  }
-
-  if (analysis.type === 'CREATE' || analysis.type === 'ALTER' || analysis.type === 'DROP') {
-    return `Error: This tool only accepts INSERT, UPDATE, or DELETE queries. For schema changes (CREATE/ALTER/DROP), use schema_query.`;
-  }
-
-  if (!confirmed) {
-    return formatPreviewMessage(analysis, sql);
-  }
-
-  try {
-    const result = await query(sql);
-    
-    const lines: string[] = [
-      `✅ **Query executed successfully** (${result.duration}ms)\n`,
-      `**Query Type:** ${analysis.type}`,
-      `**Rows affected:** ${result.rowCount || 0}`,
-    ];
-
-    return lines.join('\n');
-  } catch (error: any) {
-    return `❌ Error executing query: ${error.message}`;
-  }
-}
 
 export const schemaQueryTool: Tool = {
   name: 'schema_query',
-  description: 'Execute CREATE, ALTER, or DROP queries (schema changes). Requires confirmation before execution.',
+  description:
+    'Execute CREATE, ALTER, or DROP (DDL). Separate from write_query. Requires confirmed=true after a strong confirmation preview — nothing runs until then.',
   inputSchema: {
     type: 'object',
     properties: {
       sql: {
         type: 'string',
-        description: 'SQL CREATE, ALTER, or DROP query to execute',
+        description: 'Single CREATE/ALTER/DROP statement',
       },
       confirmed: {
         type: 'boolean',
-        description: 'Must be true to actually execute the query. If false or omitted, returns a preview only.',
+        description:
+          'Must be true to execute. If omitted/false, returns an impact preview only — nothing runs.',
         default: false,
       },
     },
     required: ['sql'],
   },
+  annotations: DESTRUCTIVE_ANNOTATIONS,
 };
-
-export async function schemaQuery(sql: string, confirmed: boolean = false): Promise<string> {
-  const analysis = analyzeQuery(sql);
-  
-  // Check if it's actually a schema query
-  if (analysis.type !== 'CREATE' && analysis.type !== 'ALTER' && analysis.type !== 'DROP') {
-    return `Error: This tool only accepts CREATE, ALTER, or DROP queries. For SELECT queries, use read_query. For INSERT/UPDATE/DELETE, use write_query.`;
-  }
-
-  if (!confirmed) {
-    return formatPreviewMessage(analysis, sql);
-  }
-
-  try {
-    const result = await query(sql);
-    
-    const lines: string[] = [
-      `✅ **Schema change executed successfully** (${result.duration}ms)\n`,
-      `**Query Type:** ${analysis.type}`,
-    ];
-
-    if (result.rowCount !== undefined) {
-      lines.push(`**Rows affected:** ${result.rowCount}`);
-    }
-
-    return lines.join('\n');
-  } catch (error: any) {
-    return `❌ Error executing schema query: ${error.message}`;
-  }
-}
 
 export const transactionQueryTool: Tool = {
   name: 'transaction_query',
-  description: 'Execute multiple SQL statements in a single transaction. Supports BEGIN/COMMIT blocks, SET ROLE, and any combination of statements. Requires confirmation before execution.',
+  description:
+    'Execute multiple SQL statements in one transaction. Preview lists per-statement risk. Requires confirmed=true after a strong confirmation preview.',
   inputSchema: {
     type: 'object',
     properties: {
       sql: {
         type: 'string',
-        description: 'SQL statements to execute in a transaction (multiple statements separated by semicolons, e.g., BEGIN; SET ROLE role_name; ALTER TABLE ...; COMMIT;)',
+        description: 'One or more SQL statements separated by semicolons',
       },
       confirmed: {
         type: 'boolean',
-        description: 'Must be true to actually execute the transaction. If false or omitted, returns a preview only.',
+        description:
+          'Must be true to execute. If omitted/false, returns a per-statement risk preview only.',
         default: false,
       },
     },
     required: ['sql'],
   },
+  annotations: DESTRUCTIVE_ANNOTATIONS,
 };
 
-export async function transactionQuery(sql: string, confirmed: boolean = false): Promise<string> {
-  // Check if SQL contains transaction keywords
-  const normalized = sql.trim().toUpperCase();
-  const hasTransactionKeywords = normalized.includes('BEGIN') || normalized.includes('COMMIT') || normalized.includes('ROLLBACK');
-  
-  if (!confirmed) {
-    const lines: string[] = [];
-    lines.push('⚠️  **HIGH WARNING** - Transaction query requires confirmation');
-    lines.push('');
-    lines.push('**Query Type:** TRANSACTION (multiple statements)');
-    lines.push('**Impact:** Will execute multiple SQL statements in a single transaction. All statements will be committed together or rolled back on error.');
-    lines.push('');
-    lines.push('**Transaction to execute:**');
-    lines.push('```sql');
-    lines.push(sql);
-    lines.push('```');
-    lines.push('');
-    
-    // Count statements
-    const statementCount = sql.split(';').filter(s => s.trim().length > 0 && !s.trim().match(/^\s*--/)).length;
-    lines.push(`**Number of statements:** ${statementCount}`);
-    lines.push('');
-    lines.push('To execute this transaction, call the tool again with `confirmed: true`');
-    
-    return lines.join('\n');
+const readSchema = z.object({
+  sql: z.string().min(1),
+  max_rows: z
+    .number()
+    .int()
+    .positive()
+    .max(ClientConstants.HARD_MAX_ROWS)
+    .optional(),
+  confirmed: z.boolean().optional(),
+});
+
+const confirmedSqlSchema = z.object({
+  sql: z.string().min(1),
+  confirmed: z.boolean().optional(),
+});
+
+export async function readQuery(
+  sql: string,
+  confirmed = false,
+  maxRows?: number,
+): Promise<string> {
+  const gate = assertReadOnlySelect(sql);
+  if (!gate.ok) {
+    return `Error: ${gate.reason}`;
   }
-
+  if (gate.analysis.needsSoftConfirmation && !confirmed) {
+    return formatSoftConfirmationPrompt(
+      gate.analysis,
+      gate.analysis.normalized,
+    );
+  }
   try {
-    const result = await executeTransaction(sql);
-    
-    if (!result.success) {
-      return `❌ **Transaction failed** (${result.duration}ms)\n\n**Error:** ${result.error}\n\n**Statements executed before error:** ${result.results.length}`;
-    }
-
-    const lines: string[] = [
-      `✅ **Transaction executed successfully** (${result.duration}ms)\n`,
-      `**Statements executed:** ${result.results.length}`,
-      '',
-      '**Statement results:**',
-    ];
-
-    result.results.forEach((stmtResult, index) => {
-      lines.push(`\n${index + 1}. ${stmtResult.statement}`);
-      lines.push(`   - Duration: ${stmtResult.duration}ms`);
-      if (stmtResult.rowCount !== undefined) {
-        lines.push(`   - Rows affected: ${stmtResult.rowCount}`);
-      }
-    });
-
-    return lines.join('\n');
-  } catch (error: any) {
-    return `❌ Error executing transaction: ${error.message}`;
+    const result = await getPostgresClient().readQuery(
+      gate.analysis.normalized,
+      maxRows,
+    );
+    const note =
+      gate.analysis.needsSoftConfirmation && confirmed
+        ? '\n_Executed after confirmation (lock side effects)._\n\n'
+        : '';
+    return (
+      note +
+      formatRowsTable(result.rows as Array<Record<string, unknown>>, {
+        durationMs: result.duration,
+        truncated: result.truncated,
+        title: 'Query results',
+      })
+    );
+  } catch (error: unknown) {
+    return `Error executing query: ${sanitizeErrorMessage(error)}`;
   }
 }
 
+export async function handleReadQuery(args: unknown): Promise<string> {
+  const parsed = readSchema.parse(args ?? {});
+  return readQuery(parsed.sql, parsed.confirmed ?? false, parsed.max_rows);
+}
+
+export async function writeQuery(
+  sql: string,
+  confirmed = false,
+): Promise<string> {
+  const analysis = analyzeQuery(sql);
+  if (analysis.isReadOnly) {
+    return 'Error: This tool only accepts INSERT, UPDATE, or DELETE. Use read_query for SELECT.';
+  }
+  if (
+    analysis.type === 'CREATE' ||
+    analysis.type === 'ALTER' ||
+    analysis.type === 'DROP'
+  ) {
+    return 'Error: Use schema_query for CREATE/ALTER/DROP.';
+  }
+  if (
+    analysis.type !== 'INSERT' &&
+    analysis.type !== 'UPDATE' &&
+    analysis.type !== 'DELETE' &&
+    analysis.type !== 'TRUNCATE'
+  ) {
+    return `Error: Unsupported write type ${analysis.type}.`;
+  }
+  if (!confirmed) {
+    return formatPreviewMessage(
+      analysis,
+      analysis.normalized || sql,
+      'write_query',
+    );
+  }
+  try {
+    const result = await getPostgresClient().query(analysis.normalized || sql);
+    return [
+      `**Query executed** (${result.duration}ms)`,
+      `**Type:** ${analysis.type}`,
+      `**Rows affected:** ${result.rowCount ?? 0}`,
+    ].join('\n');
+  } catch (error: unknown) {
+    return `Error executing query: ${sanitizeErrorMessage(error)}`;
+  }
+}
+
+export async function handleWriteQuery(args: unknown): Promise<string> {
+  const parsed = confirmedSqlSchema.parse(args ?? {});
+  return writeQuery(parsed.sql, parsed.confirmed ?? false);
+}
+
+export async function schemaQuery(
+  sql: string,
+  confirmed = false,
+): Promise<string> {
+  const analysis = analyzeQuery(sql);
+  if (
+    analysis.type !== 'CREATE' &&
+    analysis.type !== 'ALTER' &&
+    analysis.type !== 'DROP'
+  ) {
+    return 'Error: schema_query only accepts CREATE, ALTER, or DROP.';
+  }
+  if (!confirmed) {
+    return formatPreviewMessage(
+      analysis,
+      analysis.normalized || sql,
+      'schema_query',
+    );
+  }
+  try {
+    const result = await getPostgresClient().query(analysis.normalized || sql);
+    return [
+      `**Schema change executed** (${result.duration}ms)`,
+      `**Type:** ${analysis.type}`,
+      `**Rows affected:** ${result.rowCount ?? 0}`,
+    ].join('\n');
+  } catch (error: unknown) {
+    return `Error executing schema query: ${sanitizeErrorMessage(error)}`;
+  }
+}
+
+export async function handleSchemaQuery(args: unknown): Promise<string> {
+  const parsed = confirmedSqlSchema.parse(args ?? {});
+  return schemaQuery(parsed.sql, parsed.confirmed ?? false);
+}
+
+export async function transactionQuery(
+  sql: string,
+  confirmed = false,
+): Promise<string> {
+  if (!confirmed) {
+    return formatTransactionPreview(sql);
+  }
+  try {
+    const result = await getPostgresClient().executeTransaction(sql);
+    if (!result.success) {
+      return `**Transaction failed** (${result.duration}ms)\n\n**Error:** ${result.error}\n\n**Statements before error:** ${result.results.length}`;
+    }
+    const lines = [
+      `**Transaction executed** (${result.duration}ms)`,
+      `**Statements:** ${result.results.length}`,
+      '',
+      '**Results:**',
+    ];
+    result.results.forEach((stmt, index) => {
+      lines.push(`\n${index + 1}. ${stmt.statement}`);
+      lines.push(`   - Duration: ${stmt.duration}ms`);
+      if (stmt.rowCount !== undefined) {
+        lines.push(`   - Rows affected: ${stmt.rowCount}`);
+      }
+    });
+    return lines.join('\n');
+  } catch (error: unknown) {
+    return `Error executing transaction: ${sanitizeErrorMessage(error)}`;
+  }
+}
+
+export async function handleTransactionQuery(args: unknown): Promise<string> {
+  const parsed = confirmedSqlSchema.parse(args ?? {});
+  return transactionQuery(parsed.sql, parsed.confirmed ?? false);
+}

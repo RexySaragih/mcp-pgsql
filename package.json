@@ -1,7 +1,7 @@
 {
   "name": "@rexymayderio/postgres-mcp",
-  "version": "1.0.1",
-  "description": "MCP server for connecting to PostgreSQL database",
+  "version": "1.1.0",
+  "description": "MCP server for PostgreSQL schema introspection and query execution",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -14,7 +14,9 @@
     "build": "tsc && chmod +x dist/index.js",
     "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "tsc -p tsconfig.test.json && node --test test-dist/test/**/*.test.js",
+    "test:connections": "npm run build && node dist/scripts/test-connections.js"
   },
   "keywords": [
     "mcp",
@@ -22,10 +24,10 @@
     "postgres",
     "database"
   ],
-  "author": "",
+  "author": "rexymayderio",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "pg": "^8.11.3",
     "zod": "^3.23.8"
   },
@@ -33,5 +35,8 @@
     "@types/node": "^20.14.10",
     "@types/pg": "^8.10.9",
     "typescript": "^5.5.3"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
